@@ -1,55 +1,63 @@
-name: reel
+name: Hamro Chitwan News Reels
+
 on:
   schedule:
+    # Nepal time: 07:00, 09:00, 11:00, 13:00, 15:00, 17:00, 19:00
     - cron: "15 1,3,5,7,9,11,13 * * *"
   workflow_dispatch:
     inputs:
       dry_run:
-        description: "1 = build only, do not post"
+        description: "1 = create video only, do not publish"
+        required: false
         default: "0"
 
 permissions:
   contents: write
 
 concurrency:
-  group: reel
+  group: hamro-chitwan-reels
   cancel-in-progress: false
 
 jobs:
   make-reel:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - name: System packages
-        run: sudo apt-get update && sudo apt-get install -y ffmpeg libraqm0 fonts-noto-core
-      - run: pip install -r requirements.txt
-      - name: Headline font
+      - name: Install system packages
         run: |
-          mkdir -p assets
-          [ -f assets/headline_font.ttf ] || curl -fsSL "https://github.com/google/fonts/raw/main/ofl/yatraone/YatraOne-Regular.ttf" -o assets/headline_font.ttf || rm -f assets/headline_font.ttf
-      - name: Make and post
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg fonts-noto-core fonts-noto-extra
+      - name: Install Python packages
+        run: pip install -r requirements.txt
+      - name: Build and publish Reel
         env:
           FB_PAGE_ID: ${{ secrets.FB_PAGE_ID }}
           FB_PAGE_TOKEN: ${{ secrets.FB_PAGE_TOKEN }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           PIXABAY_API_KEY: ${{ secrets.PIXABAY_API_KEY }}
-          UPLOAD_MODE: video
+          GEMINI_MODEL: gemini-2.5-flash
+          TTS_VOICE: ne-NP-SagarNeural
+          FB_API_VERSION: v21.0
           DRY_RUN: ${{ github.event.inputs.dry_run || '0' }}
+          UPLOAD_MODE: reel
+          ALLOW_SOURCE_IMAGES: "1"
         run: python main.py
-      - name: Save state
+      - name: Save duplicate history
+        if: always()
         run: |
-          git config user.name "reel-bot"
+          git config user.name "hamro-chitwan-reel-bot"
           git config user.email "reel-bot@users.noreply.github.com"
           git add posted.json
-          git diff --cached --quiet || (git commit -m "state" && git push)
-      - uses: actions/upload-artifact@v4
+          git diff --cached --quiet || (git commit -m "Update posted news history" && git push)
+      - name: Upload generated video
         if: always()
+        uses: actions/upload-artifact@v4
         with:
-          name: last-reel
+          name: hamro-chitwan-last-reel
           path: out/reel.mp4
           if-no-files-found: ignore
-          retention-days: 2
+          retention-days: 3
