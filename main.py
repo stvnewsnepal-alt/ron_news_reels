@@ -166,7 +166,7 @@ def published_date(soup):
     # First prefer machine-readable publication timestamps.
     values = meta_values(
         soup, "article:published_time", "datePublished",
-        "pubdate", "publishdate", "date"
+        "pubdate", "publishdate"
     )
     for obj in jsonld_objects(soup):
         if obj.get("datePublished"):
@@ -189,10 +189,13 @@ def published_date(soup):
             clean(tag.get("itemprop", "")),
         ]).lower()
         if any(word in marker for word in ("date", "time", "publish", "posted")):
-            date_texts.append(tag.get_text(" ", strip=True))
+            txt = tag.get_text(" ", strip=True)
+            if txt and len(txt) <= 100:
+                date_texts.append(txt)
 
-    article = soup.find("article") or soup.find("main") or soup.body or soup
-    date_texts.append(article.get_text(" ", strip=True)[:3500])
+    # Only inspect date-labelled elements close to the article header.
+    # Never scan the whole article text: old dates in quotes/captions can
+    # otherwise be mistaken for the publication date.
     for value in date_texts:
         dt = parse_nepali_bs_date(value)
         if dt:
@@ -332,8 +335,10 @@ def parse_article(source, url, link_title):
     if not published:
         print("Rejected: publication date missing/unreadable:", canonical_url)
         return None
+    print("Publication timestamp detected:", published.isoformat(), "|", canonical_url)
     age = datetime.now(timezone.utc) - published
-    if age < timedelta(minutes=-30) or age > timedelta(hours=MAX_AGE_HOURS):
+    # Reject dates implausibly in the future as well as dates older than the configured window.
+    if age < timedelta(minutes=-5) or age > timedelta(hours=MAX_AGE_HOURS):
         print(f"Rejected: outside {MAX_AGE_HOURS}h freshness window:", published.isoformat())
         return None
     return {
@@ -445,9 +450,11 @@ def gemini_model():
         m["name"].split("/", 1)[-1] for m in models
         if "generateContent" in m.get("supportedGenerationMethods", [])
     ]
+    if "gemini-3.8-flash" in usable:
+        return "gemini-3.8-flash"
     if GEMINI_MODEL and GEMINI_MODEL in usable:
         return GEMINI_MODEL
-    preferences = ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-2.5-flash-lite", "gemini-2.0-flash-lite"]
+    preferences = ["gemini-3.8-flash", "gemini-2.5-flash-lite", "gemini-2.0-flash"]
     for name in preferences:
         if name in usable:
             print("Using available Gemini model:", name)
@@ -460,12 +467,23 @@ def gemini_model():
 def make_script(article):
     prompt = (PROMPT + "\nस्रोत: " + article["source"] + "\nशीर्षक: " +
               article["title"] + "\nसमाचार: " + article["text"][:6500])
-    model = gemini_model()
+    model = "gemini-3.8-flash"
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
-    r = requests.post(url, params={"key": GEMINI_KEY}, json={
+    payload = {
         "contents": [{"parts": [{"text": prompt}]}],
         "generationConfig": {"responseMimeType": "application/json", "temperature": 0.2}
-    }, timeout=90)
+    }
+    r = requests.post(url, params={"key": GEMINI_KEY}, json=payload, timeout=90)
+    if r.status_code == 404:
+        # The model named by Google's 404 response is the preferred replacement.
+        # Do not silently retry retired 2.5 models.
+        msg = r.text[:1200]
+        if "gemini-3.8-flash" not in msg:
+            raise RuntimeError(f"Gemini model not found ({model}): {msg}")
+        raise RuntimeError(
+            "Gemini API ले gemini-3.8-flash पनि उपलब्ध गराएन। "
+            "AI Studio API key/project access जाँच्नुहोस्। " + msg
+        )
     if not r.ok:
         raise RuntimeError(f"Gemini {r.status_code}: {r.text[:1200]}")
     data = r.json()
