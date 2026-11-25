@@ -1,29 +1,26 @@
-# Routine of Nepal Band: auto reels
+# Hamro Chitwan News Reels — replacement files
 
-Newest page post (photo + message) -> Gemini script (Nepali) -> edge-tts voice -> Pixabay clip +
-animated layers (ffmpeg) -> 1080x1350 (4:5) video posted to the page. Runs every 2 hours, 7 AM to 7 PM Nepal time.
+Copy these files into the repository:
+- `main.py` → repository root (replace old file)
+- `requirements.txt` → repository root (replace old file)
+- `.github/workflows/reels.yml` → same path (replace old workflow)
 
-## Setup
-1. Push this folder to a GitHub repo (public repo = free Actions minutes).
-2. Repo -> Settings -> Secrets and variables -> Actions, add:
-   - `FB_PAGE_ID`, `FB_PAGE_TOKEN` (long-lived Page token; needs pages_read_engagement, pages_manage_posts)
-   - `GEMINI_API_KEY` (Google AI Studio, free tier)
-   - `PIXABAY_API_KEY` (free)
-3. Actions -> reel -> Run workflow with `dry_run = 1` first. Download the `last-reel` artifact and check it.
-4. Run with `dry_run = 0` once, then let the schedule take over.
+Keep your existing `render.py` unchanged. This `main.py` calls the render interface previously shared:
+`render(photo, audio, headline, points, out, bg_video=None, brand=..., work=...)`.
 
-## Customize
-- `assets/overlay.png`: optional 1080x1920 transparent PNG (logo/frame exported from Canva) drawn on top.
-- `TTS_VOICE`: ne-NP-SagarNeural (male) or ne-NP-HemkalaNeural (female).
-- `GEMINI_MODEL`, `FB_API_VERSION`: update if Google/Meta retire the defaults.
-- Stock clips: check Pixabay's license before use. Never put other media's photos/videos in the reel.
+Required GitHub repository secrets:
+- `FB_PAGE_ID`
+- `FB_PAGE_TOKEN`
+- `GEMINI_API_KEY`
+- `PIXABAY_API_KEY` (optional; if absent, only article photo is used)
 
-## Size and upload mode (1080x1350)
-Facebook Reels need 9:16, so a 4:5 video is posted as a normal page video (`UPLOAD_MODE=video`, default).
-For 9:16 Reels set `UPLOAD_MODE=reel` and change `H` to 1920 in render.py.
+The workflow runs at Nepal time 07:00–19:00 every two hours.
+Manual run supports `dry_run=1` to build without Facebook publishing.
 
-## Headline font
-Workflow auto-downloads Yatra One (Google Fonts, OFL license) as the headline font. To use another Unicode font (Kalimati, Mukta ExtraBold...), commit it as `assets/headline_font.ttf`; the download is then skipped.
+Date rule:
+- Exact publication timestamps must be within `MAX_AGE_HOURS` (default 12).
+- If there is no exact timestamp, a visible Nepali Bikram Sambat date matching today's Nepali date is accepted as date-only evidence. It does not claim an exact publication time.
+- Older, future, or unverified date-only stories are rejected.
 
-Put a Unicode Nepali .ttf at `assets/headline_font.ttf` (or set `HEADLINE_FONT`). Used for headline + key lines.
-Legacy fonts (Preeti-style, e.g. Ganess) will NOT work with Unicode text: they need a text converter first.
+Important: a date-only match is based on the article page's visible date text. Check the log for
+`Accepted: today's Nepali publication date verified` to confirm the fallback was used.
