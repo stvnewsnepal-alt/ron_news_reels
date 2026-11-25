@@ -1,0 +1,55 @@
+name: reel
+on:
+  schedule:
+    - cron: "15 1,3,5,7,9,11,13 * * *"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "1 = build only, do not post"
+        default: "0"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: reel
+  cancel-in-progress: false
+
+jobs:
+  make-reel:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: System packages
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg libraqm0 fonts-noto-core
+      - run: pip install -r requirements.txt
+      - name: Headline font
+        run: |
+          mkdir -p assets
+          [ -f assets/headline_font.ttf ] || curl -fsSL "https://github.com/google/fonts/raw/main/ofl/yatraone/YatraOne-Regular.ttf" -o assets/headline_font.ttf || rm -f assets/headline_font.ttf
+      - name: Make and post
+        env:
+          FB_PAGE_ID: ${{ secrets.FB_PAGE_ID }}
+          FB_PAGE_TOKEN: ${{ secrets.FB_PAGE_TOKEN }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          PIXABAY_API_KEY: ${{ secrets.PIXABAY_API_KEY }}
+          UPLOAD_MODE: video
+          DRY_RUN: ${{ github.event.inputs.dry_run || '0' }}
+        run: python main.py
+      - name: Save state
+        run: |
+          git config user.name "reel-bot"
+          git config user.email "reel-bot@users.noreply.github.com"
+          git add posted.json
+          git diff --cached --quiet || (git commit -m "state" && git push)
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: last-reel
+          path: out/reel.mp4
+          if-no-files-found: ignore
+          retention-days: 2
