@@ -11,6 +11,7 @@ import requests
 from bs4 import BeautifulSoup
 import edge_tts
 from PIL import Image, ImageOps
+import nepali_datetime
 from render import render
 
 PAGE_ID = os.environ["FB_PAGE_ID"]
@@ -24,7 +25,7 @@ DRY_RUN = os.environ.get("DRY_RUN", "0") == "1"
 ALLOW_SOURCE_IMAGES = os.environ.get("ALLOW_SOURCE_IMAGES", "1") == "1"
 
 STATE, OUT = "posted.json", "out"
-MAX_AGE_HOURS = int(os.environ.get("MAX_AGE_HOURS", "48"))
+MAX_AGE_HOURS = int(os.environ.get("MAX_AGE_HOURS", "12"))
 MAX_ARTICLES_PER_SOURCE = 35
 MAX_ARTICLES_TO_CHECK = 50
 TZ = ZoneInfo("Asia/Kathmandu")
@@ -113,8 +114,56 @@ def jsonld_objects(soup):
         except (ValueError, TypeError):
             continue
 
+def parse_nepali_bs_date(value):
+    """Parse visible Nepali BS dates such as 'मंसिर ८, २०८३'."""
+    if not value:
+        return None
+    value = clean(value)
+    devanagari = "०१२३४५६७८९"
+    latin = "0123456789"
+    value = value.translate(str.maketrans(devanagari, latin))
+
+    months = {
+        "बैशाख": 1, "वैशाख": 1,
+        "जेठ": 2,
+        "असार": 3,
+        "साउन": 4, "श्रावण": 4,
+        "भदौ": 5, "भाद्र": 5, "भाद्र": 5,
+        "असोज": 6, "आश्विन": 6,
+        "कात्तिक": 7, "कार्तिक": 7,
+        "मंसिर": 8, "मङ्सिर": 8,
+        "पुस": 9, "पौष": 9,
+        "माघ": 10,
+        "फागुन": 11, "फाल्गुन": 11,
+        "चैत": 12, "चैत्र": 12,
+    }
+
+    month_pattern = "|".join(sorted(months, key=len, reverse=True))
+    patterns = [
+        rf"({month_pattern})\s*([0-9]{{1,2}})[,/\s-]+([0-9]{{4}})",
+        rf"([0-9]{{1,2}})\s*({month_pattern})[,/\s-]+([0-9]{{4}})",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, value)
+        if not match:
+            continue
+        groups = match.groups()
+        if groups[0] in months:
+            month, day, year = months[groups[0]], int(groups[1]), int(groups[2])
+        else:
+            day, month, year = int(groups[0]), months[groups[1]], int(groups[2])
+        try:
+            ad_date = nepali_datetime.date(year, month, day).to_datetime_date()
+            # Site shows a date, not a publication time. Noon NPT is a neutral
+            # midpoint so a date-only article is not treated as midnight-old.
+            local_dt = datetime(ad_date.year, ad_date.month, ad_date.day, 12, 0, tzinfo=TZ)
+            return local_dt.astimezone(timezone.utc)
+        except Exception:
+            continue
+    return None
+
 def published_date(soup):
-    # Publication date only. Do not use dateModified as a substitute for freshness.
+    # First prefer machine-readable publication timestamps.
     values = meta_values(
         soup, "article:published_time", "datePublished",
         "pubdate", "publishdate", "date"
@@ -124,8 +173,28 @@ def published_date(soup):
             values.append(obj["datePublished"])
     for tag in soup.select("time[datetime]"):
         values.append(tag.get("datetime"))
+
     for value in values:
         dt = parse_datetime(value)
+        if dt:
+            return dt
+
+    # Janaastha and other Nepali portals commonly render publication dates
+    # visibly in Bikram Sambat (e.g. मंसिर ८, २०८३), not ISO meta tags.
+    date_texts = []
+    for tag in soup.find_all(["time", "span", "div", "p"]):
+        marker = " ".join([
+            clean(tag.get("class", "")),
+            clean(tag.get("id", "")),
+            clean(tag.get("itemprop", "")),
+        ]).lower()
+        if any(word in marker for word in ("date", "time", "publish", "posted")):
+            date_texts.append(tag.get_text(" ", strip=True))
+
+    article = soup.find("article") or soup.find("main") or soup.body or soup
+    date_texts.append(article.get_text(" ", strip=True)[:3500])
+    for value in date_texts:
+        dt = parse_nepali_bs_date(value)
         if dt:
             return dt
     return None
