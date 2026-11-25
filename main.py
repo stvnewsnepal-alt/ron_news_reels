@@ -7,7 +7,7 @@ PAGE_ID = os.environ["FB_PAGE_ID"]
 TOKEN = os.environ["FB_PAGE_TOKEN"]
 GEMINI_KEY = os.environ["GEMINI_API_KEY"]
 PIXABAY_KEY = os.environ.get("PIXABAY_API_KEY", "")
-GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.0-flash")
+GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-flash-latest")
 GRAPH = "https://graph.facebook.com/" + os.environ.get("FB_API_VERSION", "v21.0")
 VOICE = os.environ.get("TTS_VOICE", "ne-NP-SagarNeural")  # or ne-NP-HemkalaNeural
 UPLOAD_MODE = os.environ.get("UPLOAD_MODE", "video")  # "video" = 4:5 feed video, "reel" = 9:16 only
@@ -71,85 +71,4 @@ def gen_script(text):
 
 def tts(text, path):
     async def go():
-        await edge_tts.Communicate(text, VOICE, rate="+10%", pitch="+3Hz", volume="+10%").save(path)
-    asyncio.run(go())
-
-
-def get(url, path):
-    with requests.get(url, stream=True, timeout=120) as r:
-        r.raise_for_status()
-        with open(path, "wb") as f:
-            for c in r.iter_content(1 << 16):
-                f.write(c)
-    return path
-
-
-def pixabay_clip(keywords, path):
-    if not PIXABAY_KEY:
-        return None
-    try:
-        r = requests.get("https://pixabay.com/api/videos/",
-                         params={"key": PIXABAY_KEY, "q": keywords, "per_page": 15, "safesearch": "true"},
-                         timeout=30)
-        hits = [h for h in r.json().get("hits", []) if h.get("duration", 0) >= 8]
-        if not hits:
-            return None
-        v = random.choice(hits)["videos"]
-        url = (v.get("small") or v.get("medium") or v.get("tiny"))["url"]
-        return get(url, path)
-    except Exception as e:
-        print("pixabay skipped:", e)
-        return None
-
-
-def post_video(path, caption):
-    with open(path, "rb") as f:
-        r = requests.post(f"{GRAPH}/{PAGE_ID}/videos", data={"description": caption, "access_token": TOKEN},
-                          files={"source": f}, timeout=600)
-    r.raise_for_status()
-    return r.json().get("id")
-
-
-def post_reel(path, caption):
-    s = requests.post(f"{GRAPH}/{PAGE_ID}/video_reels",
-                      data={"upload_phase": "start", "access_token": TOKEN}, timeout=60)
-    s.raise_for_status()
-    vid, up = s.json()["video_id"], s.json()["upload_url"]
-    size = os.path.getsize(path)
-    with open(path, "rb") as f:
-        u = requests.post(up, headers={"Authorization": f"OAuth {TOKEN}", "offset": "0",
-                                       "file_size": str(size)}, data=f, timeout=600)
-    u.raise_for_status()
-    fin = requests.post(f"{GRAPH}/{PAGE_ID}/video_reels", data={
-        "upload_phase": "finish", "video_id": vid, "video_state": "PUBLISHED",
-        "description": caption, "access_token": TOKEN}, timeout=120)
-    fin.raise_for_status()
-    return vid
-
-
-def main():
-    os.makedirs(OUT, exist_ok=True)
-    done = load_state()
-    post = pick_post(done)
-    if not post:
-        print("No new post to turn into a reel.")
-        return
-    print("Using post", post["id"])
-    photo = get(post["full_picture"], f"{OUT}/photo.jpg")
-    s = gen_script(post["message"])
-    print(json.dumps(s, ensure_ascii=False, indent=2))
-    tts(s["voice"], f"{OUT}/voice.mp3")
-    clip = pixabay_clip(s.get("keywords", "news"), f"{OUT}/bg.mp4")
-    video = render(photo, f"{OUT}/voice.mp3", s["headline"], s["points"], f"{OUT}/reel.mp4",
-                   bg_video=clip, work=f"{OUT}/work")
-    if DRY_RUN:
-        print("DRY_RUN: not uploading", video)
-        return
-    vid = (post_reel if UPLOAD_MODE == "reel" else post_video)(video, s.get("caption", ""))
-    print("Posted", UPLOAD_MODE, vid)
-    done.append(post["id"])
-    save_state(done)
-
-
-if __name__ == "__main__":
-    main()
+        await edge_tts.Communicate(text, VOICE, rate="+10%", pitch="+3Hz", volume="+10%")
