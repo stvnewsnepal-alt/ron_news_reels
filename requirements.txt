@@ -2,3 +2,4 @@ requests
 Pillow
 edge-tts
 beautifulsoup4
+nepali-datetime
