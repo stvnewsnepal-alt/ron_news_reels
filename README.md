@@ -1,26 +1,28 @@
-# Hamro Chitwan News Reels — replacement files
+HAMRO CHITWAN NEWS REELS
 
-Copy these files into the repository:
-- `main.py` → repository root (replace old file)
-- `requirements.txt` → repository root (replace old file)
-- `.github/workflows/reels.yml` → same path (replace old workflow)
+Files:
+- main.py
+- render.py
+- .github/workflows/reel.yml
+- requirements.txt
 
-Keep your existing `render.py` unchanged. This `main.py` calls the render interface previously shared:
-`render(photo, audio, headline, points, out, bg_video=None, brand=..., work=...)`.
+IMPORTANT SETUP:
+1. Upload the four files preserving the folder structure.
+2. Upload your Hamro Chitwan logo image to the repository ROOT with this exact name:
+   file_000000008d8c8208b201454c7871862d.png
+3. Add GitHub repository secrets:
+   FB_PAGE_ID
+   FB_PAGE_TOKEN
+   GEMINI_API_KEY
+   PIXABAY_API_KEY (optional; without it the article photo is reused)
+4. Manual run defaults to DRY RUN=1. Check the generated artifact first. Select 0 to publish manually.
+5. Scheduled runs publish automatically at 7 AM, 9 AM, 11 AM, 1 PM, 3 PM, 5 PM and 7 PM Nepal time.
 
-Required GitHub repository secrets:
-- `FB_PAGE_ID`
-- `FB_PAGE_TOKEN`
-- `GEMINI_API_KEY`
-- `PIXABAY_API_KEY` (optional; if absent, only article photo is used)
+Gemini TTS:
+The code defaults to model gemini-2.5-flash-preview-tts and voice Cruz. If your Google AI Studio account exposes a different TTS model name, set GEMINI_TTS_MODEL as a repository variable. The narration script model defaults to gemini-2.5-flash; override with GEMINI_TEXT_MODEL if needed.
 
-The workflow runs at Nepal time 07:00–19:00 every two hours.
-Manual run supports `dry_run=1` to build without Facebook publishing.
+Freshness:
+Stories without a machine-readable publication timestamp are rejected. Only a verified timestamp within the last 12 hours is accepted. A run stops if the latest eligible story has already been posted.
 
-Date rule:
-- Exact publication timestamps must be within `MAX_AGE_HOURS` (default 12).
-- If there is no exact timestamp, a visible Nepali Bikram Sambat date matching today's Nepali date is accepted as date-only evidence. It does not claim an exact publication time.
-- Older, future, or unverified date-only stories are rejected.
-
-Important: a date-only match is based on the article page's visible date text. Check the log for
-`Accepted: today's Nepali publication date verified` to confirm the fallback was used.
+NOTE:
+The renderer adds a subtle locally synthesized ambient backing pad (not a downloaded copyrighted song). No headline, subtitles, source label, or other text is drawn over the video. The Facebook post caption still contains the story headline and hashtags.
