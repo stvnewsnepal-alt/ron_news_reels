@@ -1,5 +1,6 @@
 """Hamro Chitwan News Reels — one verified fresh story per run."""
-import os, re, json, hashlib, asyncio, random, time
+import os, re, json, hashlib, asyncio, time
+from pathlib import Path
 from datetime import datetime, timedelta, timezone
 from urllib.parse import urljoin, urlparse, unquote
 from zoneinfo import ZoneInfo
@@ -8,6 +9,7 @@ import requests
 from bs4 import BeautifulSoup
 import edge_tts
 from PIL import Image, ImageOps
+import nepali_datetime
 from render import render
 
 PAGE_ID = os.environ["FB_PAGE_ID"]
@@ -51,12 +53,15 @@ def load_state():
     try:
         obj = json.loads(Path(STATE).read_text(encoding="utf-8"))
         return set(obj if isinstance(obj, list) else [])
-    except Exception:
+    except (OSError, ValueError, TypeError):
         return set()
 
 
 def save_state(items):
-    Path(STATE).write_text(json.dumps(sorted(items)[-500:], ensure_ascii=False, indent=2), encoding="utf-8")
+    Path(STATE).write_text(
+        json.dumps(sorted(items)[-500:], ensure_ascii=False, indent=2),
+        encoding="utf-8"
+    )
 
 
 def get_page(url):
@@ -80,9 +85,8 @@ def meta_values(soup, *keys):
 def parse_datetime(value):
     if not value:
         return None
-    value = clean(value)
     try:
-        dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        dt = datetime.fromisoformat(clean(value).replace("Z", "+00:00"))
         if dt.tzinfo is None:
             dt = dt.replace(tzinfo=TZ)
         return dt.astimezone(timezone.utc)
@@ -106,21 +110,66 @@ def jsonld_objects(soup):
             continue
 
 
+def nepali_digits(value):
+    return str(value).translate(str.maketrans("०१२३४५६७८९", "0123456789"))
+
+
+MONTHS = {
+    "बैशाख": 1, "वैशाख": 1, "जेठ": 2, "जेष्ठ": 2,
+    "असार": 3, "श्रावण": 4, "साउन": 4, "भदौ": 5, "भाद्र": 5,
+    "असोज": 6, "आश्विन": 6, "कात्तिक": 7, "कार्तिक": 7,
+    "मंसिर": 8, "मङ्सिर": 8, "पुष": 9, "पुस": 9,
+    "माघ": 10, "फागुन": 11, "चैत": 12, "चैत्र": 12,
+}
+
+
+def visible_nepali_date(soup):
+    # Search the article's visible date area first, then the whole document.
+    candidates = []
+    for selector in ("time", "[class*='date']", "[class*='time']", "[class*='publish']"):
+        for node in soup.select(selector):
+            candidates.append(clean(node.get("datetime") or node.get_text(" ", strip=True)))
+    candidates.append(clean(soup.get_text(" ", strip=True))[:18000])
+
+    pattern = re.compile(
+        r"([0-9]{1,2})\s*(बैशाख|वैशाख|जेठ|जेष्ठ|असार|श्रावण|साउन|भदौ|भाद्र|"
+        r"असोज|आश्विन|कात्तिक|कार्तिक|मंसिर|मङ्सिर|पुष|पुस|माघ|फागुन|चैत|चैत्र)"
+        r"\s*,?\s*([0-9]{4})"
+    )
+    today = nepali_datetime.date.today()
+    for candidate in candidates:
+        candidate = nepali_digits(candidate)
+        match = pattern.search(candidate)
+        if not match:
+            continue
+        try:
+            article_date = nepali_datetime.date(
+                int(match.group(3)), MONTHS[match.group(2)], int(match.group(1))
+            )
+            # A visible date-only label proves "today", not an exact 12-hour time.
+            if article_date == today:
+                return datetime.now(timezone.utc), "date_only"
+        except (ValueError, TypeError):
+            continue
+    return None, None
+
+
 def published_date(soup):
-    """Use publication timestamps only; never substitute dateModified or generic time tags."""
+    """Return (UTC datetime, precision). Never use dateModified as publication date."""
     values = meta_values(soup, "article:published_time")
     for obj in jsonld_objects(soup):
         typ = obj.get("@type", [])
         typ = typ if isinstance(typ, list) else [typ]
         if any("Article" in str(t) for t in typ) and obj.get("datePublished"):
             values.append(obj["datePublished"])
+
     parsed = [parse_datetime(v) for v in values]
     parsed = [d for d in parsed if d]
-    if not parsed:
-        # Date-only Nepali/visible labels cannot prove a 12-hour window. Reject rather than guess.
-        return None
-    # Prefer the earliest explicit published timestamp if metadata fields disagree.
-    return min(parsed)
+    if parsed:
+        # Keep the earliest explicit published timestamp if metadata disagrees.
+        return min(parsed), "timestamp"
+
+    return visible_nepali_date(soup)
 
 
 def article_image_urls(soup, article_url):
@@ -140,12 +189,13 @@ def article_image_urls(soup, article_url):
             seen.add(u)
             found.append(u)
 
-    # Prioritise actual article-body images; OG images are only fallbacks.
     article = soup.find("article") or soup.find("main") or soup.body or soup
     for img in article.find_all("img"):
         if img.find_parent(["header", "footer", "nav"]):
             continue
-        desc = " ".join([clean(img.get("alt")), " ".join(img.get("class", [])), clean(img.get("id"))]).lower()
+        desc = " ".join([
+            clean(img.get("alt")), " ".join(img.get("class", [])), clean(img.get("id"))
+        ]).lower()
         if any(x in desc for x in ("logo", "banner", "avatar", "placeholder", "advertisement")):
             continue
         for attr in ("data-src", "data-original", "data-lazy-src", "src"):
@@ -188,8 +238,7 @@ def parse_article(source, url, link_title):
     canonical_url = urljoin(url, canonical.get("href")) if canonical and canonical.get("href") else url
     if urlparse(canonical_url).netloc.lower().removeprefix("www.") != urlparse(url).netloc.lower().removeprefix("www."):
         return None
-    path = urlparse(canonical_url).path.lower()
-    if any(x in path for x in EXCLUDED):
+    if any(x in urlparse(canonical_url).path.lower() for x in EXCLUDED):
         return None
 
     article_types = []
@@ -200,33 +249,41 @@ def parse_article(source, url, link_title):
     if og_type and og_type != "article" and not any("Article" in str(t) for t in article_types):
         return None
 
-    title = ((meta_values(soup, "og:title") or [""])[0]
-             or (meta_values(soup, "twitter:title") or [""])[0]
-             or clean((soup.find("h1").get_text(" ", strip=True)) if soup.find("h1") else "")
-             or link_title)
+    h1 = soup.find("h1")
+    title = (
+        (meta_values(soup, "og:title") or [""])[0]
+        or (meta_values(soup, "twitter:title") or [""])[0]
+        or (clean(h1.get_text(" ", strip=True)) if h1 else "")
+        or link_title
+    )
     description = (meta_values(soup, "og:description", "description") or [""])[0]
     body = soup.find("article") or soup.find("main") or soup.body or soup
     paragraphs = [clean(p.get_text(" ", strip=True)) for p in body.find_all("p")]
     text = " ".join(p for p in paragraphs if len(p) > 35) or description
     if not title or len(text) < 60:
         return None
-    if any(x in (title + " " + canonical_url).lower() for x in ("sponsored", "advertisement", "प्रायोजित", "विज्ञापन")):
+    if any(x in (title + " " + canonical_url).lower()
+           for x in ("sponsored", "advertisement", "प्रायोजित", "विज्ञापन")):
         return None
 
-    published = published_date(soup)
+    published, precision = published_date(soup)
     if not published:
-        print("Rejected: exact publication timestamp missing:", canonical_url)
+        print("Rejected: publication date not verified:", canonical_url)
         return None
+
     now = datetime.now(timezone.utc)
-    age = now - published
-    if age < timedelta(minutes=-5) or age > timedelta(hours=MAX_AGE_HOURS):
-        print(f"Rejected: outside {MAX_AGE_HOURS}-hour window:", published.isoformat())
-        return None
+    if precision == "timestamp":
+        age = now - published
+        if age < timedelta(minutes=-5) or age > timedelta(hours=MAX_AGE_HOURS):
+            print(f"Rejected: timestamp outside {MAX_AGE_HOURS}-hour window:", published.isoformat())
+            return None
+    else:
+        print("Accepted: today's Nepali publication date verified; exact time unavailable.")
 
     return {
         "source": source, "url": canonical_url, "title": title,
         "text": text[:10000], "images": article_image_urls(soup, canonical_url),
-        "published_at": published.isoformat(),
+        "published_at": published.isoformat(), "date_precision": precision,
         "key": hashlib.sha256(canonical_url.encode()).hexdigest(),
     }
 
@@ -245,10 +302,10 @@ def discover_news():
                         items.append(item)
                 except Exception as exc:
                     print("Skipped:", url, str(exc)[:180])
+
         except Exception as exc:
             print("Source unavailable:", source, str(exc)[:180])
 
-    # Reject a timestamp repeated across several different stories from the same portal.
     counts = {}
     for item in items:
         key = (item["source"], item["published_at"])
@@ -258,6 +315,7 @@ def discover_news():
         before = len(items)
         items = [a for a in items if (a["source"], a["published_at"]) not in suspicious]
         print("Rejected repeated/template timestamps:", before - len(items))
+
     items.sort(key=lambda a: a["published_at"], reverse=True)
     return items
 
@@ -284,9 +342,9 @@ def download_article_image(url, path):
                 with Image.open(tmp) as im:
                     if im.width < 300 or im.height < 180:
                         raise ValueError("Image resolution धेरै सानो")
-                    # Keep the original composition. Only normalise file format/orientation.
-                    frame = ImageOps.exif_transpose(im.copy()).convert("RGB")
-                    frame.save(path, "JPEG", quality=94)
+                    ImageOps.exif_transpose(im.copy()).convert("RGB").save(
+                        path, "JPEG", quality=94
+                    )
                 return path
             except requests.RequestException:
                 if attempt:
@@ -302,10 +360,9 @@ def choose_article_photo(articles):
         print("\nPhoto check:", article["source"], article["title"])
         for url in article["images"]:
             try:
-                p = download_article_image(url, f"{OUT}/article.jpg")
-                if p:
-                    article["image_url"] = url
-                    return article, p
+                path = download_article_image(url, f"{OUT}/article.jpg")
+                article["image_url"] = url
+                return article, path
             except Exception as exc:
                 print("Image skipped:", str(exc)[:140])
     return None, None
@@ -313,14 +370,13 @@ def choose_article_photo(articles):
 
 PROMPT = """तपाईं नेपाली समाचारका छोटा Facebook Reel स्क्रिप्ट लेखक हुनुहुन्छ।
 तल दिइएको समाचारका तथ्य मात्र प्रयोग गर्नुहोस्। नाम, संख्या, मिति, उद्धरण वा कारण नथप्नुहोस्।
-४५ देखि ८० नेपाली शब्दमा स्पष्ट र स्वाभाविक वाचन लेख्नुहोस्; मुख्य तथ्य, परिणाम र सान्दर्भिक विवरण राख्नुहोस्।
-headline छोटो र आकर्षक तर तथ्यपरक होस् (अधिकतम ८ शब्द)।
-keywords मा Pixabay खोज्न मिल्ने ३-६ वटा ठोस English search terms दिनुहोस्। सामान्य शब्द (news, people, city) नदिनुहोस्।
+४५ देखि ८० नेपाली शब्दमा स्पष्ट र स्वाभाविक वाचन लेख्नुहोस्।
+headline अधिकतम ८ शब्दको तथ्यपरक होस्।
+keywords मा Pixabay खोज्न मिल्ने ३-६ ठोस English search terms दिनुहोस्।
 JSON मात्र फर्काउनुहोस्: headline, voice, keywords, caption."""
 
 
 def fallback_script(article):
-    # Deterministic, fact-preserving fallback. No invented names, dates or numbers.
     title = clean(article["title"]).strip(" ।")
     sentences = re.split(r"(?<=[।!?])\s+", clean(article["text"]))
     selected, words = [], 0
@@ -339,10 +395,8 @@ def fallback_script(article):
     if len(voice.split()) > 90:
         voice = " ".join(voice.split()[:90])
     return {
-        "headline": title[:100],
-        "voice": voice,
-        "keywords": title,
-        "caption": title + "। #HamroChitwan #News",
+        "headline": title[:100], "voice": voice,
+        "keywords": title, "caption": title + "। #HamroChitwan #News",
     }
 
 
@@ -358,8 +412,7 @@ def gemini_model():
         m["name"].split("/", 1)[-1] for m in r.json().get("models", [])
         if "generateContent" in m.get("supportedGenerationMethods", [])
     ]
-    preferred = [GEMINI_MODEL, "gemini-2.5-flash", "gemini-2.5-flash-lite", "gemini-2.0-flash"]
-    for name in preferred:
+    for name in (GEMINI_MODEL, "gemini-2.5-flash", "gemini-2.5-flash-lite", "gemini-2.0-flash"):
         if name and name in models:
             return name
     if models:
@@ -378,34 +431,29 @@ def make_script(article):
         }
         response = None
         for attempt in range(3):
-            try:
-                response = requests.post(url, params={"key": GEMINI_KEY}, json=payload, timeout=(12, 65))
-                if response.status_code == 429:
-                    raise RuntimeError("Gemini quota 429 — retry नगरी fallback प्रयोग")
-                if response.status_code in (500, 502, 503, 504):
-                    if attempt < 2:
-                        time.sleep(2 ** attempt * 2)
-                        continue
-                response.raise_for_status()
-                break
-            except (requests.Timeout, requests.ConnectionError):
-                if attempt == 2:
-                    raise
+            response = requests.post(
+                url, params={"key": GEMINI_KEY}, json=payload, timeout=(12, 65)
+            )
+            if response.status_code == 429:
+                raise RuntimeError("Gemini quota 429 — factual fallback प्रयोग")
+            if response.status_code in (500, 502, 503, 504) and attempt < 2:
                 time.sleep(2 ** attempt * 2)
-        data = response.json()
-        raw = data["candidates"][0]["content"]["parts"][0]["text"]
+                continue
+            response.raise_for_status()
+            break
+        raw = response.json()["candidates"][0]["content"]["parts"][0]["text"]
         obj = json.loads(raw)
         result = {
             "headline": clean(obj.get("headline"))[:110],
             "voice": clean(obj.get("voice")),
             "keywords": clean(obj.get("keywords")),
-            "caption": clean(obj.get("caption")),
+            "caption": clean(obj.get("caption")) or clean(obj.get("headline")),
         }
         if not result["headline"] or not result["voice"] or not result["keywords"]:
             raise ValueError("Gemini script अपूरो")
         return result
     except Exception as exc:
-        print("Gemini unavailable; using factual fallback:", str(exc)[:220])
+        print("Gemini unavailable; factual fallback:", str(exc)[:220])
         return fallback_script(article)
 
 
@@ -438,25 +486,20 @@ def media_download(url, path, max_bytes=35 * 1024 * 1024):
 
 
 def query_tokens(text):
-    stop = {"the","and","for","with","from","news","nepal","latest","about","this","that"}
+    stop = {"the", "and", "for", "with", "from", "news", "nepal", "latest", "about", "this", "that"}
     return {x for x in re.findall(r"[a-z0-9]{3,}", clean(text).lower()) if x not in stop}
 
 
 def relevance_score(tags, query):
     a, b = query_tokens(tags), query_tokens(query)
-    if not a or not b:
-        return 0.0
-    return len(a & b) / max(1, min(len(a), len(b)))
+    return len(a & b) / max(1, min(len(a), len(b))) if a and b else 0.0
 
 
 def pixabay_related_media(keywords, path_prefix):
-    """Return only a clearly query-matched Pixabay video/image; otherwise no stock media."""
     if not PIXABAY_KEY:
         print("PIXABAY_API_KEY छैन; अतिरिक्त दृश्य राखिएन।")
         return None, None
     query = clean(keywords)[:100]
-    if not query:
-        return None, None
     candidates = []
     try:
         rv = requests.get("https://pixabay.com/api/videos/", params={
@@ -465,9 +508,8 @@ def pixabay_related_media(keywords, path_prefix):
         rv.raise_for_status()
         for hit in rv.json().get("hits", []):
             tags = clean(hit.get("tags"))
+            variant = hit.get("videos", {}).get("medium") or hit.get("videos", {}).get("small")
             score = relevance_score(tags, query)
-            variants = hit.get("videos", {})
-            variant = variants.get("medium") or variants.get("small")
             if variant and score >= 0.34 and int(hit.get("duration", 0)) >= 5:
                 candidates.append((score, "video", variant.get("url"), tags))
     except Exception as exc:
@@ -489,14 +531,13 @@ def pixabay_related_media(keywords, path_prefix):
         print("Pixabay image search skipped:", str(exc)[:140])
 
     if not candidates:
-        print("Pixabay मा समाचारसँग स्पष्ट मेल खाने दृश्य भेटिएन; stock media प्रयोग गरिएन।")
+        print("समाचारसँग स्पष्ट मेल खाने Pixabay दृश्य भेटिएन; stock media प्रयोग गरिएन।")
         return None, None
 
     candidates.sort(key=lambda x: x[0], reverse=True)
     score, kind, url, tags = candidates[0]
     try:
-        ext = ".mp4" if kind == "video" else ".jpg"
-        dest = path_prefix + ext
+        dest = path_prefix + (".mp4" if kind == "video" else ".jpg")
         media_download(url, dest)
         if kind == "image":
             with Image.open(dest) as im:
@@ -527,6 +568,8 @@ def upload_reel(path, caption):
         "description": caption, "access_token": TOKEN
     }, timeout=120)
     finish.raise_for_status()
+    result = finish.json()
+    print("Facebook finish response:", json.dumps(result, ensure_ascii=False))
     return video_id
 
 
@@ -538,34 +581,45 @@ def main():
     fresh = [a for a in articles if a["key"] not in done]
     print("\nVerified fresh, unused articles:", len(fresh))
     if not fresh:
-        print(f"{MAX_AGE_HOURS} घण्टाभित्रको नयाँ र मिति प्रमाणित समाचार भेटिएन। Reel बनाइएन।")
-        return
+        raise RuntimeError(
+            "१२ घण्टाभित्रको नयाँ timestamp वा आजको प्रमाणित नेपाली मिति भएको "
+            "नयाँ समाचार भेटिएन। Reel बनाइएन।"
+        )
 
     article, photo_path = choose_article_photo(fresh)
     if not article or not photo_path:
-        raise RuntimeError("नयाँ समाचारको वास्तविक article photo भेटिएन; गलत वा generic फोटो प्रयोग गरिएन।")
+        raise RuntimeError("नयाँ समाचारको वास्तविक article photo भेटिएन; generic फोटो प्रयोग गरिएन।")
 
     print("\nSELECTED:", article["source"], article["title"])
-    print("Published:", article["published_at"])
+    print("Published:", article["published_at"], "precision:", article["date_precision"])
     script = make_script(article)
     print("\nSCRIPT:\n", json.dumps(script, ensure_ascii=False, indent=2))
 
     voice_path = f"{OUT}/voice.mp3"
     make_tts(script["voice"], voice_path)
-    media_kind, extra_media = pixabay_related_media(script["keywords"], f"{OUT}/pixabay_related")
-    video = render(
-        photo_path, voice_path, script["headline"], f"{OUT}/reel.mp4",
-        bg_video=extra_media if media_kind == "video" else None,
-        logo_candidates=[],
-        source_credit=article["source"],
-        extra_image=extra_media if media_kind == "image" else None,
+    if not os.path.exists(voice_path) or os.path.getsize(voice_path) < 1000:
+        raise RuntimeError("नेपाली voice फाइल बनेन।")
+
+    media_kind, extra_media = pixabay_related_media(
+        script["keywords"], f"{OUT}/pixabay_related"
     )
-    if not video or not os.path.exists(video):
-        raise RuntimeError("Reel video बनेन।")
-    print("REEL CREATED:", video)
+
+    # Compatibility with the existing render.py signature:
+    # render(photo, audio, headline, points, out, bg_video=None, brand=..., work=...)
+    points = []
+    video = render(
+        photo_path, voice_path, script["headline"],
+        points, f"{OUT}/reel.mp4",
+        bg_video=extra_media if media_kind == "video" else None,
+        brand="fb.com/ilovechitwan",
+        work=""
+    )
+    if not video or not os.path.exists(video) or os.path.getsize(video) < 10000:
+        raise RuntimeError("Reel video बनेन वा फाइल अपूरो छ।")
+    print("REEL CREATED:", video, "bytes:", os.path.getsize(video))
 
     if DRY_RUN:
-        print("DRY_RUN=1: भिडियो बन्यो; publish र history update गरिएन।")
+        print("DRY_RUN=1: Reel बनेको; Facebook publish र history update रोकियो।")
         return
 
     video_id = upload_reel(video, script["caption"])
