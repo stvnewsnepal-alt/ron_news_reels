@@ -7,12 +7,13 @@ Secrets: GEMINI_API_KEY, PIXABAY_API_KEY, FB_PAGE_ID, FB_PAGE_TOKEN
 Env: SLOT = morning7 | morning9 | evening5 | night9   (auto-detected if empty)
      DRY_RUN = 1  -> video only, no upload
 """
-import os, sys, json, re, asyncio, datetime, textwrap, time, requests
+import os, sys, json, re, asyncio, datetime, textwrap, time, wave, subprocess, requests
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 import edge_tts
-from moviepy.editor import (ImageClip, AudioFileClip, CompositeVideoClip,
+from moviepy.editor import (ImageClip, CompositeVideoClip,
                             ColorClip, concatenate_videoclips)
+from moviepy.audio.AudioClip import AudioArrayClip
 
 GEMINI_KEY = os.environ["GEMINI_API_KEY"]
 PIXABAY_KEY = os.environ["PIXABAY_API_KEY"]
@@ -142,6 +143,20 @@ def make_voice(text, path):
     raise RuntimeError("TTS failed")
 
 
+def load_audio(mp3_path):
+    """mp3 -> wav -> numpy (fixes moviepy 'reading past end of mp3' error).
+    Returns (AudioArrayClip padded with silence, speech_seconds)."""
+    wav = mp3_path.replace(".mp3", ".wav")
+    subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-i", mp3_path,
+                    "-ar", "44100", "-ac", "2", wav], check=True)
+    with wave.open(wav) as w:
+        raw = w.readframes(w.getnframes())
+    arr = np.frombuffer(raw, dtype=np.int16).reshape(-1, 2).astype(np.float32) / 32768.0
+    secs = len(arr) / 44100.0
+    pad = np.zeros((int(44100 * 0.6), 2), dtype=np.float32)
+    return AudioArrayClip(np.concatenate([arr, pad]), fps=44100), secs
+
+
 # ---------------- 4. Graphic layers (PIL -> RGBA) ----------------
 def font(sz):
     return ImageFont.truetype(FONT, sz)
@@ -259,8 +274,9 @@ def build_video(script, name):
         p = f"{OUT}/{name}_{i}"
         bg_path = get_image(sc["bg_keywords"], p + "_bg.jpg")
         bd_path = get_image(sc["badge_keywords"], p + "_badge.jpg", "all")
-        aud = AudioFileClip(make_voice(sc["narration"], p + ".mp3"))
-        dur = aud.duration + 0.35
+        aud, secs = load_audio(make_voice(sc["narration"], p + ".mp3"))
+        dur = secs + 0.35
+        aud = aud.set_duration(dur)
 
         bg = (to_clip(cover(bg_path, W, H).convert("RGBA"), dur)
               .resize(lambda t, d=dur: 1 + 0.12 * t / d)
