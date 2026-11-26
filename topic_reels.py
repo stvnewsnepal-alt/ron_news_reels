@@ -19,7 +19,9 @@ PIXABAY_KEY = os.environ["PIXABAY_API_KEY"]
 FB_PAGE_ID = os.environ.get("FB_PAGE_ID")
 FB_TOKEN = os.environ.get("FB_PAGE_TOKEN")
 DRY_RUN = os.environ.get("DRY_RUN", "0") == "1"
-GEMINI_MODEL = os.environ.get("GEMINI_TEXT_MODEL", "gemini-2.5-flash")
+# 2.5-flash is shut down; try newest first, fall back automatically
+GEMINI_MODELS = [m for m in [os.environ.get("GEMINI_TEXT_MODEL"), "gemini-flash-latest",
+                 "gemini-3.8-flash", "gemini-3.6-flash", "gemini-3.5-flash-lite"] if m]
 
 W, H = 1080, 1920
 VOICE = "ne-NP-SagarNeural"                       # or ne-NP-HemkalaNeural
@@ -76,22 +78,28 @@ def make_script(slot, history):
    "badge_label":"२-३ शब्दको लेबल",
    "bg_keywords":"english pixabay search 2-3 words",
    "badge_keywords":"english pixabay search 1-2 words"}}]}}"""
-    url = (f"https://generativelanguage.googleapis.com/v1beta/models/"
-           f"{GEMINI_MODEL}:generateContent?key={GEMINI_KEY}")
-    for attempt in range(3):
-        try:
-            r = requests.post(url, json={
-                "contents": [{"parts": [{"text": prompt}]}],
-                "generationConfig": {"responseMimeType": "application/json"}},
-                timeout=120)
-            r.raise_for_status()
-            txt = r.json()["candidates"][0]["content"]["parts"][0]["text"]
-            data = json.loads(re.sub(r"^```json|```$", "", txt.strip()))
-            assert len(data["scenes"]) >= 4
-            return data
-        except Exception as e:
-            print("Gemini retry:", e)
-            time.sleep(5)
+    for model in GEMINI_MODELS:
+        url = (f"https://generativelanguage.googleapis.com/v1beta/models/"
+               f"{model}:generateContent?key={GEMINI_KEY}")
+        for attempt in range(2):
+            try:
+                r = requests.post(url, json={
+                    "contents": [{"parts": [{"text": prompt}]}],
+                    "generationConfig": {"responseMimeType": "application/json"}},
+                    timeout=180)
+                if r.status_code == 404:
+                    print("Model not found:", model)
+                    break                      # try next model
+                r.raise_for_status()
+                parts = r.json()["candidates"][0]["content"]["parts"]
+                txt = "".join(p.get("text", "") for p in parts if not p.get("thought"))
+                data = json.loads(re.sub(r"^```json|```$", "", txt.strip()))
+                assert len(data["scenes"]) >= 4
+                print("Gemini model used:", model)
+                return data
+            except Exception as e:
+                print(f"Gemini retry ({model}):", str(e)[:200])
+                time.sleep(5)
     raise RuntimeError("Gemini failed")
 
 
