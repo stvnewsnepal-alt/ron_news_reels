@@ -2,44 +2,68 @@ name: Topic Reels
 on:
   workflow_dispatch:
     inputs:
+      slot:
+        description: "morning7 / morning9 / evening5 / night9"
+        default: "morning7"
       dry_run:
         description: "1 = only build video (no post), 0 = publish"
         default: "1"
   schedule:
-    - cron: "15 4 * * *"   # 10:00 AM Nepal time, daily
+    - cron: "15 1 * * *"    # 7:00 AM Nepal
+    - cron: "15 3 * * *"    # 9:00 AM Nepal
+    - cron: "15 11 * * *"   # 5:00 PM Nepal
+    - cron: "15 15 * * *"   # 9:00 PM Nepal
 
 permissions:
   contents: write
 
+concurrency:
+  group: topic-reels
+  cancel-in-progress: false
+
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-      - name: System deps (ffmpeg, Nepali font, text shaping)
+      - name: System deps
         run: |
           sudo apt-get update
           sudo apt-get install -y ffmpeg fonts-noto-core libraqm0 libfribidi0
       - name: Python deps
-        run: pip install moviepy==1.0.3 pillow==9.5.0 edge-tts requests numpy
-      - name: Run
+        run: pip install moviepy==1.0.3 "pillow==9.5.0" edge-tts requests numpy
+      - name: Pick slot
+        id: slot
+        run: |
+          case "${{ github.event.schedule }}" in
+            "15 1 * * *")  S=morning7 ;;
+            "15 3 * * *")  S=morning9 ;;
+            "15 11 * * *") S=evening5 ;;
+            "15 15 * * *") S=night9 ;;
+            *) S="${{ github.event.inputs.slot }}" ;;
+          esac
+          echo "slot=$S" >> "$GITHUB_OUTPUT"
+      - name: Make and post reel
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           PIXABAY_API_KEY: ${{ secrets.PIXABAY_API_KEY }}
           FB_PAGE_ID: ${{ secrets.FB_PAGE_ID }}
           FB_PAGE_TOKEN: ${{ secrets.FB_PAGE_TOKEN }}
+          SLOT: ${{ steps.slot.outputs.slot }}
           DRY_RUN: ${{ github.event.inputs.dry_run || '0' }}
         run: python topic_reels.py
       - uses: actions/upload-artifact@v4
+        if: always()
         with:
-          name: video
+          name: reel
           path: out/*.mp4
-      - name: Save posted topic history
+      - name: Save history
         run: |
-          git config user.name "bot"; git config user.email "bot@users.noreply.github.com"
+          git config user.name "reels-bot"
+          git config user.email "bot@users.noreply.github.com"
           git add posted_topics.json || true
-          git diff --cached --quiet || (git commit -m "Update posted topics" && git push)
+          git diff --cached --quiet || (git commit -m "Update posted topics" && git pull --rebase && git push)
